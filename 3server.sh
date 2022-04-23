@@ -1,0 +1,1 @@
+cd server && ./server DFS3 10003

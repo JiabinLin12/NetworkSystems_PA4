@@ -1,0 +1,1 @@
+cd server && ./server DFS4 10004
