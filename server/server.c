@@ -18,6 +18,7 @@
 #include <string.h>
 
 #define BUFSIZE 1024
+#define SMALL_BUFSIZE 30
 #define CHECK(X) ({int __val = (X); (__val == (-1) ? ({fprintf(stderr, "ERROR ("__FILE__":%d) -- %s\n", __LINE__, strerror(errno)); exit(-1); -1;}) : __val);})
 
 typedef struct dfc_conf_info{
@@ -57,6 +58,7 @@ void show_packet_info(packet_info_t pkt_info){
     printf("command: %s\n", pkt_info.command);
     printf("filename: %s\n", pkt_info.filename);
     printf("chunk_idx: %d\n", pkt_info.chunk_idx);
+    printf("content_length: %d\n", pkt_info.content_len);
 }
 
 void show_user_info(account_t user_info){
@@ -76,7 +78,7 @@ bool verify_authentication(int sockfd, struct sockaddr_in clientaddr){
     memset(&user_info,0,sizeof(user_info));
     
     CHECK(recvfrom(sockfd, &user_info, sizeof(user_info), 0,(struct sockaddr *) &clientaddr, &clientlen));
-    printf("Verifying User...\n");
+    printf("User authenticating...\n");
     fp = fopen("dfs.conf", "r");
     if(fp==NULL)
       error("no dfs.conf");
@@ -85,7 +87,7 @@ bool verify_authentication(int sockfd, struct sockaddr_in clientaddr){
       strcat(user, "\n");
       if(!strcmp(user_info.user,user)&&!strcmp(user_info.pass,pass)){
         verified = true;
-        printf("User Verified\n");
+        printf("User authenticated\n");
         break;
       }
     }
@@ -119,35 +121,45 @@ void socket_config(int *sockfd, int portno, struct sockaddr_in *serveraddr){
     error("ERROR on binding");
 
 }
-
-
-bool handle_cmd_info(int sockfd, struct sockaddr_in clientaddr,packet_info_t *pkt_info){
+void handle_put_cmd(int sockfd, struct sockaddr_in clientaddr,packet_info_t pkt_info, char DFS[20]){
   socklen_t clientlen = sizeof(clientaddr);
-  if(!verify_authentication(sockfd, clientaddr)){
-    return false;
-  }
-  printf("reciving info from client\n");
-  CHECK(recvfrom(sockfd, pkt_info, sizeof(*pkt_info), 0,(struct sockaddr *) &clientaddr, &clientlen));
-  printf("recived info from client\n");
-  return true;
+  char user_folder[SMALL_BUFSIZE], filename[SMALL_BUFSIZE], *file_content;
+  show_packet_info(pkt_info);
+  CHECK(snprintf(user_folder, SMALL_BUFSIZE, "%s/%s", DFS, pkt_info.user_info.user));
+  CHECK(snprintf(filename, SMALL_BUFSIZE, "%s.%d", pkt_info.filename, pkt_info.chunk_idx));
+  mkdir(user_folder, 0777);
+  printf("filename %s\nuserfolder %s", filename,user_folder);
+  file_content = (char *)malloc(pkt_info.content_len*sizeof(char));
+  CHECK(recvfrom(sockfd, file_content, pkt_info.content_len*sizeof(char), 0,(struct sockaddr *) &clientaddr, &clientlen));
+  printf("Content:\n%s", file_content);
+  free(file_content);
 }
 
-void handle_cmds( int sockfd,struct sockaddr_in clientaddr){
+
+
+void handle_cmds( int sockfd,struct sockaddr_in clientaddr, char DFS[20]){
   packet_info_t pkt_info;
   memset(&pkt_info, 0, sizeof(pkt_info));
-  if(!handle_cmd_info(sockfd, clientaddr,&pkt_info)){
+  socklen_t clientlen = sizeof(clientaddr);
+  if(!verify_authentication(sockfd, clientaddr)){
+    printf("authentication failed, try again\n");
     return;
   }
-  show_packet_info(pkt_info);
-  // if(!strcmp(pkt_info.command,"PUT")){
-  //   //handle_put_cmd(sockfd, clientaddr);     
-  // }else if(!strcmp(pkt_info.command,"GET")){
-  //   printf("GET\n");
-  // }else if(!strcmp(pkt_info.command, "LIST")){
-  //   printf("LIST\n");
-  // }else{
-  //   printf("Invalid command %s\n",pkt_info.command);
-  // }
+  CHECK(recvfrom(sockfd, &pkt_info, sizeof(pkt_info), 0,(struct sockaddr *) &clientaddr, &clientlen));
+  printf("recived info from client\n");
+  
+  if(!strcmp(pkt_info.command,"PUT")){
+    handle_put_cmd(sockfd, clientaddr, pkt_info,DFS);
+    memset(&pkt_info, 0, sizeof(pkt_info));
+    CHECK(recvfrom(sockfd, &pkt_info, sizeof(pkt_info), 0,(struct sockaddr *) &clientaddr, &clientlen));  
+    handle_put_cmd(sockfd, clientaddr, pkt_info,DFS);   
+  }else if(!strcmp(pkt_info.command,"GET")){
+    printf("GET\n");
+  }else if(!strcmp(pkt_info.command, "LIST")){
+    printf("LIST\n");
+  }else{
+    printf("Invalid command %s\n",pkt_info.command);
+  }
 }
 
 int main(int argc, char **argv) {
@@ -165,6 +177,6 @@ int main(int argc, char **argv) {
   strcat(DFS, argv[1]);
   mkdir(DFS, 0777);
   while (1) {
-    handle_cmds(sockfd,clientaddr);
+    handle_cmds(sockfd,clientaddr,DFS);
   }
 }
