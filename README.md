@@ -8,9 +8,9 @@
     * LIST, PUT, GET, MKDIR
 ## Instruction
   * open four terminal and run 
-    * ./1server
-    * ./2server
-    * ./3server
-    * ./4server
-  *  open one more terminal and run either
-    * ./aliceclient.sh or ./bobclient.sh  
+    * `./1server`
+    * `./2server`
+    * `./3server`
+    * `./4server`
+  *  open one more terminal and run either\
+    * `./aliceclient.sh` or `./bobclient.sh`
