@@ -4,6 +4,7 @@
   * seperate one file to four pieces and store them in four different remote servers
   * Each server store two piece of each files so even if one server is down, the file can still be created
   * Handle multiple users
+  * Data encryption and decryption
   * Implemented commands:
     * LIST, PUT, GET, MKDIR
 ## Instruction
