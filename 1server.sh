@@ -1,1 +1,1 @@
-cd server && ./server DFS1 10001
+make && cd server && ./server DFS1 10001

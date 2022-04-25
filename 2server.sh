@@ -1,2 +1,2 @@
-cd server && ./server DFS2 10002
+make && cd server && ./server DFS2 10002
 

@@ -1,0 +1,1 @@
+make && cd client && ./client bobdfc.conf

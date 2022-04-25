@@ -1,1 +1,1 @@
-cd server && ./server DFS3 10003
+make && cd server && ./server DFS3 10003

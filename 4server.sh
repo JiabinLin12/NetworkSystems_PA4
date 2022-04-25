@@ -1,1 +1,1 @@
-cd server && ./server DFS4 10004
+make && cd server && ./server DFS4 10004
