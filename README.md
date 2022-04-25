@@ -12,4 +12,5 @@
     * ./2server
     * ./3server
     * ./4server
-  *  
+  *  open one more terminal and run either
+    * ./aliceclient.sh or ./bobclient.sh  
