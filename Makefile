@@ -10,7 +10,7 @@ client: client/client.c
 	
 
 server: server/server.c
-	$(CC) $(CFLAGS) server/server.c -o server/server
+	$(CC) $(CFLAGS) server/server.c -o server/server -lcrypto -lssl -lz
 	clear
 
 update:

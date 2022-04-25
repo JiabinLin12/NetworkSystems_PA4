@@ -13,16 +13,20 @@
 #include <stdbool.h>
 #include <errno.h>
 #include <openssl/md5.h>
+#include <dirent.h>
+#include <sys/stat.h>
+
 #define MD5_DIGEST_LENGTH 16
 
 #define BUFSIZE 1024
+#define SMLBUFF 60
 #define NUM_DFS 4
 #define ACTIVE_DFS NUM_DFS
 #define CHUCK_DUP 2
 #define CHUCK_NUM 4
 #define ARG_MAX_SIZE 1024
 #define SET_BIT(BYTE, NBIT) ((BYTE) |= (1<<(NBIT)))
-#define CLEAR_BIT(BYTE, NBIT) ((BYTE) &= (1<<(NBIT)))
+#define CLEAR_BIT(BYTE, NBIT) ((BYTE) &= ~(1<<(NBIT)))
 #define CHECK_BIT(BYTE, NBIT) ((((BYTE) & (1<<(NBIT))) !=0)  ? 1 : 0)
 //#define CHECK_BIT(BYTE,NBIT)  (((BYTE & (1 << NBIT)) != 0) ? 1 : 0)
 
@@ -30,11 +34,13 @@
 
 /*idx1: seq; idx2 chunk; idx3 dfs*/
 const uint8_t lookup_dis[4][4][2] = {
-  {{0,3}, {0,1}, {1,2}, {2,3}},
   {{0,1}, {1,2}, {2,3}, {0,3}},
-  {{1,2}, {2,3}, {0,3}, {0,1}},
-  {{2,3}, {0,3}, {0,1}, {1,2}}
+  {{3,0}, {0,1}, {1,2}, {2,3}},
+  {{2,3}, {3,0}, {0,1}, {1,2}},
+  {{1,2}, {2,3}, {3,0}, {0,1}}
 };
+
+
 
 typedef struct dfc_conf_info{
     char hostname[20];
@@ -47,28 +53,53 @@ typedef struct account {
     char pass[40];
 }account_t;
 
+typedef struct store_s {
+    char *chunk[NUM_DFS];
+    int chunk_len[NUM_DFS];
+    int chunk_avl_pool;
+    int chunk_not_wrtn;
+    int next_wchunk;
+}store_t;
+
+typedef struct getfile{
+    char filename[40];
+    uint8_t cidx;
+}getfile_info_t;
 
 typedef struct packet_info {
     char command[10];
     char filename[40];
+    char foldername[40];
     uint32_t chunk_idx;
     uint32_t content_len; 
     account_t user_info;
+    getfile_info_t gf[NUM_DFS];
 }packet_info_t;
+
+
+typedef struct flcheck {
+    char filename[SMLBUFF][40];
+    uint8_t fl_complete[SMLBUFF];
+    uint8_t fname_num;
+}flcheck_t;
+
+
+
 /* 
  * error - wrapper for perror
  */
 void usage(){
-    printf("\n############Usage:############\nPUT [file]\nGET [file]\nLIST\n#############end##############\n");
+    printf("\n############Usage:############\nPUT [file]\nGET [file]\nMKDIR [folder]\nLIST\n#############end##############\n");
 }
 
 void show_packet_info(packet_info_t pkt_info){
-    printf("\n============pkt_info=============\n\n");
+    printf("\n============pkt_info=============\n");
     printf("user: %s",pkt_info.user_info.user);
     printf("password: %s\n", pkt_info.user_info.pass);
     printf("command: %s\n", pkt_info.command);
     printf("filename: %s\n", pkt_info.filename);
     printf("chunk_idx: %d\n", pkt_info.chunk_idx);
+    printf("content_length: %d\n", pkt_info.content_len);
 }
 
 void error(char *msg) {
@@ -77,25 +108,55 @@ void error(char *msg) {
 }
 
 bool get_user_input(packet_info_t *pkt_info){
-    char argopt[ARG_MAX_SIZE],*cmd, *filename;
+    char argopt[ARG_MAX_SIZE],*cmd, *filename, *foldername;
     usage();
     bzero(argopt, ARG_MAX_SIZE);
     fgets(argopt, ARG_MAX_SIZE, stdin);
     cmd = strtok(argopt, " \n\r\0");
     filename = strtok(NULL, " \n\r\0");
+    foldername = strtok(NULL, " \n\r\0");
+
     if(cmd == NULL){ 
       printf("error: no input command\n");
       return false;
     } 
     strcpy(pkt_info->command, cmd);
-    if(filename!=NULL)
+    if((!strcmp(pkt_info->command, "mkdir") || !strcmp(pkt_info->command, "MKDIR"))&&
+       filename==NULL){
+          printf("no subfolder input");
+          return false;
+    }
+    if((!strcmp(pkt_info->command, "list") || 
+       !strcmp(pkt_info->command, "LIST")   ||
+       !strcmp(pkt_info->command, "mkdir")  || 
+       !strcmp(pkt_info->command, "MKDIR")) &&
+       filename!=NULL){
+        pkt_info->filename[0] = '\0'; 
+        strcpy(pkt_info->foldername, filename);
+    }else if(filename!=NULL){
       strcpy(pkt_info->filename, filename);
-    else
-      pkt_info->filename[0] = '\0'; 
-    
+      if(foldername!=NULL){
+        strcpy(pkt_info->foldername, foldername);
+      }
+    }else{
+        pkt_info->filename[0] = '\0'; 
+        pkt_info->foldername[0] = '\0'; 
+    }
     return true;
 }
 
+//ref: https://stackoverflow.com/questions/7627723/how-to-create-a-md5-hash-of-a-string-in-c
+void md5_str(char* str, char* md5buf){
+  unsigned char md5sum[16];
+  MD5_CTX ctx;
+  MD5_Init(&ctx);
+  MD5_Update(&ctx, str, strlen(str));
+  MD5_Final(md5sum, &ctx);
+
+  for(int i = 0; i < 16; ++i){
+    sprintf(md5buf+i*2, "%02x", (unsigned int)md5sum[i]);
+  }
+}
 
 //Ref:https://stackoverflow.com/questions/14295980/md5-reference-error
 void md5_file(char *filename, int *patten_seq){
@@ -124,17 +185,31 @@ void md5_file(char *filename, int *patten_seq){
     fclose (fp);
 }
 
-// void socket_close(int sfd){
-//     if(sfd==-1)
-//         return;
-//     CHECK(shutdown(sfd, SHUT_RDWR));
-//     close(sfd);
-// }
-// if(!*verify){
-//         printf("dfs%d: Invalid Username/Password. Please try again.\n", i+1);
-//     }
-//    *vflag = SET_BIT(*vflag,  i);
 
+void encrypt_decrypt(int option, char *pass, char *fc, int len){
+    unsigned char pass_md5[SMLBUFF];
+    uint32_t hex_digest = 0, shift_amount=0;
+    md5_str(pass, pass_md5);
+    for(int i = 0; i < 4; i++) {
+        hex_digest = hex_digest | (pass_md5[i] << 8 * (3-i));
+    }
+
+    shift_amount = (hex_digest % NUM_DFS)+1;
+    switch(option){
+        case 0:
+            for(int i=0; (i<len && (fc[i]!='\0'));i++){
+                fc[i] = fc[i] + shift_amount;
+            }
+            break;
+        case 1:
+            for(int i=0; (i<len && (fc[i]!='\0'));i++){
+                fc[i] = fc[i] - shift_amount;
+            }
+            break;
+        default:
+            printf("wrong option\n");
+    }
+}
 
 void is_egain_recv(int n){
     int errno_cp = errno;
@@ -143,10 +218,14 @@ void is_egain_recv(int n){
     }
 }
 
+
+
 void send_authentication(account_t user_info, int sockfd, struct sockaddr_in serveraddr,bool *verify){
     struct timeval timeout[2] = {{1,0},{0,0}};
     int n =0;
     socklen_t serverlen = sizeof(serveraddr);
+    user_info.user[strcspn(user_info.user, "\n")] = 0;
+    user_info.pass[strcspn(user_info.pass, "\n")] = 0;
     CHECK(sendto(sockfd, &user_info, sizeof(user_info), 0, (struct sockaddr *)&serveraddr, serverlen));
     CHECK(setsockopt(sockfd,SOL_SOCKET,SO_RCVTIMEO,(char*)&timeout[0],sizeof(struct timeval))); 
     n = recvfrom(sockfd, verify, sizeof(*verify), 0, (struct sockaddr *)&serveraddr, &serverlen);
@@ -221,23 +300,9 @@ void connect_server(int *sockfd, char *hostname, struct sockaddr_in *serveraddr,
     (*serveraddr).sin_port = htons(portno);
 }
 
-
-void handle_put_cmd(int sockfd[NUM_DFS], struct sockaddr_in serveraddr[NUM_DFS],packet_info_t pkt_info){
-    size_t file_size = 0;
-    struct timeval timeout[2] = {{1,0},{0,0}};
-    uint32_t packet_size=0, remain_size =0, sidx[2] = {-1,-1};
-    socklen_t serverlen = sizeof(serveraddr[0]);
-    char *file_content;
-    int patten_seq; 
-    uint8_t vflag;
-    bool verify = false;
-    FILE *fp = fopen (pkt_info.filename, "rb");
-    if (fp == NULL) {
-        printf ("%s can't be opened.\n", pkt_info.filename);
-        return;
-    }
-
-    md5_file(pkt_info.filename, &patten_seq);
+void get_chunks(packet_info_t *pkt_info,char *fc[NUM_DFS],uint32_t c_len[NUM_DFS],FILE *fp){
+    uint32_t packet_size=0, remain_size =0,file_size=0;
+    
     /*get file size*/
     fseek(fp, 0,SEEK_END);
     file_size = ftell(fp);  
@@ -245,50 +310,240 @@ void handle_put_cmd(int sockfd[NUM_DFS], struct sockaddr_in serveraddr[NUM_DFS],
 
     packet_size = file_size/NUM_DFS;
     remain_size = file_size%NUM_DFS;
-    show_packet_info(pkt_info);
-    for(int j=0; j<NUM_DFS; j++){
-        send_authentication(pkt_info.user_info, sockfd[j],serveraddr[j],&verify);
-        if(verify) {
-            vflag = SET_BIT(vflag,  j);
-            verify = false;
-            printf("dfs%d is online\n", j);
-        }
+
+    for(int i=0; i<CHUCK_NUM; i++){
+        c_len[i] = (i==CHUCK_NUM-1)? packet_size+remain_size:packet_size;
+        fc[i] = (char *)malloc(c_len[i]);
+        CHECK(fread(fc[i], 1, c_len[i], fp));
+        encrypt_decrypt(0, pkt_info->user_info.pass, fc[i], c_len[i]);
     }
-    printf("vflag %d\n", vflag);
-
-
-    for(int i=0; i<CHUCK_NUM;i++){
-        sidx[0] = lookup_dis[patten_seq][i][0];
-        sidx[1] = lookup_dis[patten_seq][i][1];
-
-        pkt_info.chunk_idx = i;
-        pkt_info.content_len = (i==CHUCK_NUM-1)? packet_size+remain_size:packet_size;
-        file_content = (char *)malloc(pkt_info.content_len*sizeof(char));
-        CHECK(fread(file_content, 1, pkt_info.content_len, fp));
-        show_packet_info(pkt_info);
-        if(CHECK_BIT(vflag, sidx[0])){
-            CHECK(sendto(sockfd[sidx[0]], &pkt_info, sizeof(pkt_info), 0, (struct sockaddr *)&serveraddr[i], serverlen));
-            CHECK(sendto(sockfd[sidx[0]], file_content, pkt_info.content_len, 0, (struct sockaddr *)&serveraddr[i], serverlen));
-            printf("1. pkt send to dfs%d sockfd=%d chuck %d\n",sidx[0], sockfd[sidx[0]],pkt_info.chunk_idx );
-        }        
-        if(CHECK_BIT(vflag, sidx[1])){
-            CHECK(sendto(sockfd[sidx[1]], &pkt_info, sizeof(pkt_info), 0, (struct sockaddr *)&serveraddr[i], serverlen));
-            CHECK(sendto(sockfd[sidx[1]], file_content, pkt_info.content_len, 0, (struct sockaddr *)&serveraddr[i], serverlen));
-            printf("2. pkt send to dfs%d sockfd=%d chuck %d\n",sidx[1], sockfd[sidx[1]], pkt_info.chunk_idx);
-        }
-        free(file_content);
-    }
-    
 }
 
+void free_chucks(char *fc[NUM_DFS]){
+    for(int i=0; i<NUM_DFS;i++){
+        free(fc[i]);
+    }
+}
+//printf("1.cidx %d dfs%d, seq %d, %s\n", cidx[0], i,patten_seq,fc[cidx[0]]);
+//printf("2.cidx %d dfs%d, seq  %d, %s\n", cidx[1], i,patten_seq,fc[cidx[1]]);
+void handle_put_cmd(int sockfd[NUM_DFS], struct sockaddr_in serveraddr[NUM_DFS],packet_info_t pkt_info){
+    uint32_t cidx[2] = {-1,-1}, c_len[NUM_DFS];
+    socklen_t serverlen = sizeof(serveraddr[0]);
+    char *fc[NUM_DFS];
+    int patten_seq; 
+    bool verify = false;
+    FILE *fp = fopen (pkt_info.filename, "rb");
+    if (fp == NULL) {
+        printf ("%s can't be opened.\n", pkt_info.filename);
+        return;
+    }
+    md5_file(pkt_info.filename, &patten_seq);
+    get_chunks(&pkt_info,fc,c_len,fp);
+    for(int i=0; i<NUM_DFS; i++){
+        verify = false;
+        send_authentication(pkt_info.user_info, sockfd[i],serveraddr[i],&verify);
+        if(!verify) 
+            continue;
+
+        cidx[0] = lookup_dis[patten_seq][i][0];
+        pkt_info.chunk_idx = cidx[0];
+        pkt_info.content_len = c_len[cidx[0]];
+        CHECK(sendto(sockfd[i], &pkt_info, sizeof(pkt_info), 0, (struct sockaddr *)&serveraddr[i], serverlen));
+        CHECK(sendto(sockfd[i], fc[cidx[0]], pkt_info.content_len, 0, (struct sockaddr *)&serveraddr[i], serverlen));
+
+        cidx[1] = lookup_dis[patten_seq][i][1];
+        pkt_info.chunk_idx = cidx[1];
+        pkt_info.content_len = c_len[cidx[1]];
+        CHECK(sendto(sockfd[i], &pkt_info, sizeof(pkt_info), 0, (struct sockaddr *)&serveraddr[i], serverlen));
+        CHECK(sendto(sockfd[i], fc[cidx[1]], pkt_info.content_len, 0, (struct sockaddr *)&serveraddr[i], serverlen));
+    }
+    free_chucks(fc);
+    fclose(fp);
+}
+
+
+
+void write_chunk(char *fcontent, FILE *fp, store_t *wh,packet_info_t pkt_info){
+    wh->chunk_len[pkt_info.chunk_idx] = pkt_info.content_len;
+    if(pkt_info.chunk_idx==wh->next_wchunk){
+        //encrypt_decrypt(1, pkt_info.user_info.pass, fcontent,wh->chunk_len[pkt_info.chunk_idx]);
+        fwrite(fcontent,sizeof(char), wh->chunk_len[pkt_info.chunk_idx], fp);
+        wh->next_wchunk++;
+        wh->chunk_not_wrtn= CLEAR_BIT(wh->chunk_not_wrtn,pkt_info.chunk_idx);
+    }else{
+        wh->chunk[pkt_info.chunk_idx] = realloc(wh->chunk[pkt_info.chunk_idx], wh->chunk_len[pkt_info.chunk_idx]);
+        memcpy(wh->chunk[pkt_info.chunk_idx], fcontent, wh->chunk_len[pkt_info.chunk_idx]);
+        wh->chunk_avl_pool= SET_BIT(wh->chunk_avl_pool,pkt_info.chunk_idx);
+        wh->chunk_not_wrtn= SET_BIT(wh->chunk_not_wrtn,pkt_info.chunk_idx);
+    }
+    while(CHECK_BIT(wh->chunk_avl_pool,wh->next_wchunk) && CHECK_BIT(wh->chunk_not_wrtn,wh->next_wchunk)){
+        //encrypt_decrypt(1, pkt_info.user_info.pass, wh->chunk[wh->next_wchunk],wh->chunk_len[wh->next_wchunk]);
+        fwrite(wh->chunk[wh->next_wchunk],sizeof(char), wh->chunk_len[wh->next_wchunk], fp);
+        wh->next_wchunk++;
+        wh->chunk_not_wrtn= CLEAR_BIT(wh->chunk_not_wrtn,pkt_info.chunk_idx);
+    }
+}
+
+void handle_get_cmd(int sockfd[NUM_DFS], struct sockaddr_in serveraddr[NUM_DFS],packet_info_t pkt_info, bool file_exist){
+    struct timeval timeout[2] = {{1,0},{0,0}};
+    int n =0,filefound = false;
+    bool verify = false;
+    socklen_t serverlen = sizeof(serveraddr[0]);
+    packet_info_t finfo;
+    store_t wearhouse;
+    char download_path[SMLBUFF], *fc = (char *)malloc(sizeof(char));
+    if(!file_exist){
+        printf("File does not exist\n");
+        return;
+    }
+    
+    memset(&wearhouse, 0, sizeof(wearhouse));
+    if(pkt_info.filename[0]=='\0'){
+        printf("no filename provided for command: get");
+        return;
+    }
+    mkdir("./download", 0777);
+    CHECK(snprintf(download_path, SMLBUFF, "%s/%s", "./download", pkt_info.filename));
+    FILE *fp = fopen (download_path, "wb");
+    if(fp==NULL){
+        printf("file failed to open");
+        return;
+    }
+
+    for(int i=0;i<NUM_DFS;i++){
+        CHECK(snprintf(pkt_info.gf[i].filename, 40, ".%s.%d", pkt_info.filename, i));
+        pkt_info.gf[i].cidx = 0;
+        wearhouse.chunk[i] = (char *)malloc(sizeof(char));
+    }
+
+    for(int i=0; i<NUM_DFS; i++){
+        verify = false;
+        send_authentication(pkt_info.user_info, sockfd[i],serveraddr[i],&verify);
+        if(!verify) 
+            continue;
+        CHECK(sendto(sockfd[i], &pkt_info, sizeof(pkt_info), 0, (struct sockaddr *)&serveraddr[i], serverlen));
+        CHECK(setsockopt(sockfd[i],SOL_SOCKET,SO_RCVTIMEO,(char*)&timeout[0],sizeof(struct timeval))); 
+        for(int j=0; j<NUM_DFS; j++){
+            n = recvfrom(sockfd[i], &filefound, sizeof(filefound), 0, (struct sockaddr *)&serveraddr[i], &serverlen); 
+            is_egain_recv(n);
+            if(!filefound)
+                continue;           
+                
+            n = recvfrom(sockfd[i], &finfo, sizeof(finfo), 0, (struct sockaddr *)&serveraddr[i], &serverlen); 
+            is_egain_recv(n);           
+            fc = realloc(fc, finfo.content_len);
+            n = recvfrom(sockfd[i], fc, finfo.content_len, 0, (struct sockaddr *)&serveraddr[i], &serverlen); 
+            is_egain_recv(n);
+            write_chunk(fc,fp, &wearhouse,finfo);
+        }
+        CHECK(setsockopt(sockfd[i],SOL_SOCKET,SO_RCVTIMEO,(char*)&timeout[1],sizeof(struct timeval))); 
+    }
+    for(int i=0; i<NUM_DFS; i++){
+        free(wearhouse.chunk[i]);
+    }
+    free(fc);
+    fclose(fp);
+}
+
+
+
+void check_set_filename_flag(char *tmp_fn, flcheck_t *flist_buf, int cidx){
+    int fnum = flist_buf->fname_num;
+    for(int i=0; i<fnum; i++){
+        if(!strcmp(flist_buf->filename[i], tmp_fn)){
+            flist_buf->fl_complete[i] = SET_BIT(flist_buf->fl_complete[i], cidx);
+            return;
+        }
+    }
+    strncpy(flist_buf->filename[fnum],tmp_fn,strlen(tmp_fn) );
+    flist_buf->fl_complete[fnum] = SET_BIT(flist_buf->fl_complete[fnum], cidx);
+    flist_buf->fname_num++;
+}
+
+void checklist(char buf[NUM_DFS][BUFSIZE], flcheck_t *flist_buf){
+    char *p, tmp_fn[40] = {0};
+    int cidx, j=0, name_len;
+    for(int i=0; i<NUM_DFS; i++){
+        if(buf[i]==NULL)
+            continue;
+
+        p = strtok(buf[i], "_");
+        while(p!=0){
+            name_len = strlen(p);
+            strncpy(tmp_fn, p, name_len-2);
+            sscanf(p+(name_len-1), "%d", &cidx);
+            check_set_filename_flag(tmp_fn, flist_buf, cidx);
+            memset(tmp_fn, 0, 40*sizeof(char));
+            p = strtok(NULL, "_");
+        }
+        j=0;
+    }
+}
+
+void handle_list_cmd(int sockfd[NUM_DFS], struct sockaddr_in serveraddr[NUM_DFS],\
+                    packet_info_t pkt_info, bool isget, bool *file_exist){
+    bool verify = false;
+    char buf[NUM_DFS][BUFSIZE] = {0}, tmp[SMLBUFF]=".";
+    flcheck_t flist_buf;
+    memset(&flist_buf, 0, sizeof(flcheck_t));
+    memset(buf,0,sizeof(buf[0][0] * NUM_DFS * NUM_DFS));
+    socklen_t serverlen = sizeof(serveraddr[0]); 
+    if(isget){
+        strcpy(pkt_info.command, "list");
+        strcat(tmp, pkt_info.filename);
+    }
+    for(int i=0; i<NUM_DFS; i++){
+        verify = false;
+        send_authentication(pkt_info.user_info, sockfd[i],serveraddr[i],&verify);
+        if(!verify) 
+            continue;
+        CHECK(sendto(sockfd[i], &pkt_info, sizeof(pkt_info), 0, (struct sockaddr *)&serveraddr[i], serverlen));
+        CHECK(recvfrom(sockfd[i], buf[i], BUFSIZE, 0, (struct sockaddr *)&serveraddr[i], &serverlen));        
+        if(!strcmp(buf[i],"n")){
+            return;
+        }
+    }
+    checklist(buf, &flist_buf);
+    show_packet_info(pkt_info);
+    for(int i=0; i<flist_buf.fname_num; i++){
+        if(!isget && flist_buf.fl_complete[i]==15){
+            printf("%s\n",flist_buf.filename[i]);
+        }else if (!isget){
+            printf("%s [incomplete]\n",flist_buf.filename[i]);
+        }
+        if( isget && (!strcmp(flist_buf.filename[i],tmp)) && 
+            (flist_buf.fl_complete[i]==15)){
+            *file_exist = 1;
+        }
+    }
+}
+
+void handle_mkdir_cmd(int sockfd[NUM_DFS], struct sockaddr_in serveraddr[NUM_DFS],packet_info_t pkt_info){
+    bool verify = false;
+    socklen_t serverlen = sizeof(serveraddr[0]); 
+    for(int i=0; i<NUM_DFS; i++){
+        verify = false;
+        send_authentication(pkt_info.user_info, sockfd[i],serveraddr[i],&verify);
+        if(!verify) 
+            continue;
+        CHECK(sendto(sockfd[i], &pkt_info, sizeof(pkt_info), 0, (struct sockaddr *)&serveraddr[i], serverlen));
+    }
+}
 void handle_cmds(packet_info_t pkt_info, int sockfd[NUM_DFS],struct sockaddr_in serveraddr[NUM_DFS]){
-    uint8_t vflag = 0;
+    bool file_exist = 0, dummy=0;
     if((!strcmp(pkt_info.command,"PUT") || !strcmp(pkt_info.command,"put"))){        
         handle_put_cmd(sockfd, serveraddr, pkt_info);     
-    }else if(!strcmp(pkt_info.command,"GET")){
-        printf("GET\n");
-    }else if(!strcmp(pkt_info.command, "LIST")){
-        printf("LIST\n");
+    
+    }else if(!strcmp(pkt_info.command,"GET") || !strcmp(pkt_info.command, "get")){
+        handle_list_cmd(sockfd, serveraddr, pkt_info,1,&file_exist);
+        handle_get_cmd(sockfd, serveraddr, pkt_info,file_exist);
+    
+    }else if(!strcmp(pkt_info.command, "LIST") || !strcmp(pkt_info.command, "list")){
+        handle_list_cmd(sockfd, serveraddr,pkt_info,0,&dummy);
+    
+    }else if(!strcmp(pkt_info.command, "mkdir") || !strcmp(pkt_info.command, "MKDIR")){
+        handle_mkdir_cmd(sockfd, serveraddr, pkt_info);
+
     }else{
         printf("Invalid command\n");
     }
@@ -316,7 +571,6 @@ int main(int argc, char **argv) {
 
     for(int i=0; i<ACTIVE_DFS; i++){
         connect_server(&sockfd[i], conf_info[i].hostname, &serveraddr[i], conf_info[i].portno);
-        printf("sockfd %d portno %d\n",sockfd[i],conf_info[i].portno);
     }
 
 
